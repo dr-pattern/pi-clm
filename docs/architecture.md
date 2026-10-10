@@ -14,7 +14,7 @@ limitations.
 Pi session JSONL (raw, append-only, branch-aware)
              │  context hook
              ▼
-Effective context — the AgentMessage[] actually sent to the provider
+Effective conversation — CLM's projection + source suffix
              │  rendered before every request
              ▼
 Mirror file  — LIVE_CONTEXT.md, model-editable
@@ -24,8 +24,12 @@ Revision checkpoint — persisted as a Pi custom entry on the active branch
 ```
 
 - **Raw transcript** is the source of truth and audit log. Nothing here is ever deleted.
-- **Effective context** is what the model sees. It equals the latest accepted revision plus
-  every raw message appended since that revision was anchored.
+  Pi's canonical session projection applies compaction and native context edits before
+  request hooks; a flat list of JSONL messages is not the native request context.
+- **Effective conversation** is CLM's contribution to the next request. It equals the
+  latest accepted revision plus every source message appended since that revision was
+  anchored. Later extension hooks and provider conversion can still transform it; it is
+  not a final-wire snapshot.
 - **Mirror** is a text rendering of the effective context. Editing it is the only way the
   model changes its context. It is not byte-for-byte the provider input: the system prompt,
   extension-managed annotation notes and the one-call notices are added outside it.
@@ -36,7 +40,8 @@ Revision checkpoint — persisted as a Pi custom entry on the active branch
 ## 2. Request lifecycle
 
 ```text
-before_agent_start   append the editing protocol + mirror path to the system prompt
+before_agent_start   contribute the editing protocol + mirror path as a prompt section
+                    (legacy Pi: append to the returned system prompt)
 context(raw)         1. validate the active checkpoint against the raw prefix
                      2. effective = checkpoint.messages ++ raw suffix
                      3. drop messages Pi excludes from the request
@@ -54,6 +59,13 @@ turn_end             1. read the mirror; unchanged → nothing to do
 
 Rendering happens in the `context` hook rather than on demand so the mirror is available
 to every file tool and the extension never wraps Pi's built-in tools.
+
+On Pi versions with mutable prompt sections, `before_agent_start` contributes the protocol
+and optional steering to `systemPromptOptions.sections.live_context_management`. It does
+not return a whole `systemPrompt`: on Pi 1.0.3 that creates a forced snapshot which can hide
+later extensions' section or append mutations. Pi 0.85.0 has no mutable sections API, so
+pi-clm keeps its legacy string-return path there. Another extension's deliberate forced
+prompt is never cleared or overwritten by the native-section path.
 
 ## 3. Mirror format
 
@@ -145,7 +157,29 @@ annotations are `live-context-annotation` entries.
 
 A checkpoint anchors to the digest of the messages this extension receives, so a context
 extension loaded *before* pi-clm whose transform varies between calls invalidates it.
-Load pi-clm first. Two consecutive invalidations raise a user-facing warning.
+Load pi-clm before such varying `context` transforms. Even a changing injected timestamp
+can invalidate the prefix; strict digest validation is deliberately retained. Two
+consecutive invalidations raise a user-facing warning. Native prompt sections avoid
+pi-clm's whole-prompt override, but do not make arbitrary conversation transforms
+order-independent.
+
+Before the first context-hook snapshot after resume, panels and compaction estimates use
+Pi's canonical `buildSessionContext` projection, not a flat list of JSONL messages. Pi-owned
+`system` messages are excluded from that fallback to match the context-hook message space;
+otherwise an unchanged conversation checkpoint would appear invalid in the panel. Viewing
+a fallback snapshot does not persist a checkpoint reset.
+
+Other extensions that return a complete prompt for an additive contribution can still
+freeze out later guidance, even with pi-clm disabled. This was reproduced with pi-add-dir
+1.3.1 and open-codebase-index 0.35.2 on Pi 1.0.3. Their own guidance and tools survived;
+later structured/append contributions did not. Those extensions need their own additive
+prompt-section changes; moving only pi-clm cannot repair an earlier forced snapshot.
+
+Continuity-prefix stability (#1 / PR #7) is separate from both prompt composition and
+checkpoint invalidation. Continuity is still appended after the conversation in this
+version, so an unchanged annotation can move as turns arrive and break request-prefix
+reuse. Native-section support does not change that ordering. Clean reload/resume controls
+preserved checkpoints, but do not establish the cause of every reset reported in #9.
 
 ## 7. Budget and reminders
 

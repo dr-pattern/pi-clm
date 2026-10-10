@@ -132,10 +132,12 @@ const RecallParameters = Type.Object({
 });
 
 function asLiveMessages(messages: AgentMessage[]): LiveContextMessage[] {
+	// SAFETY: LiveContextMessage is a permissive structural view; original Pi objects are retained.
 	return messages as unknown as LiveContextMessage[];
 }
 
 function asAgentMessages(messages: LiveContextMessage[]): AgentMessage[] {
+	// SAFETY: callers reuse Pi messages or validated CLM-lowered messages, never authored wire roles.
 	return messages as unknown as AgentMessage[];
 }
 
@@ -145,6 +147,7 @@ function estimateLiveContextTokens(messages: LiveContextMessage[]): number {
 	return messages.reduce((total, message) => {
 		let tokens = tokenEstimateCache.get(message);
 		if (tokens === undefined) {
+			// SAFETY: estimates use the same Pi-compatible message objects as the outgoing context.
 			tokens = estimateTokens(message as unknown as AgentMessage);
 			tokenEstimateCache.set(message, tokens);
 		}
@@ -163,6 +166,7 @@ function estimateTextTokens(text: string): number {
  */
 function lastProviderReportedTokens(rawMessages: LiveContextMessage[]): { tokens: number; index: number } | undefined {
 	for (let index = rawMessages.length - 1; index >= 0; index--) {
+		// SAFETY: rawMessages reuses Pi-sourced messages; restore their union before narrowing the role.
 		const message = rawMessages[index] as unknown as AgentMessage;
 		if (message.role !== "assistant") continue;
 		if (message.stopReason === "aborted" || message.stopReason === "error") continue;
@@ -1050,14 +1054,15 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	/**
 	 * The exact context-hook snapshot when there is one: checkpoints anchor to that message
 	 * space, which may differ from the raw session after earlier context handlers. Before
-	 * the hook has run (e.g. just after resume), reconstruct it from the session.
+	 * the hook has run (e.g. just after resume), reconstruct its conversation-only message
+	 * space from the session: newer Pi stores prompt/tool system messages outside this hook.
 	 */
 	function contextSnapshot(ctx: ExtensionContext): CurrentContextView & { rawMessages: LiveContextMessage[] } {
 		const captured = currentContextView;
 		if (captured?.rawMessages) return { ...captured, rawMessages: captured.rawMessages };
 		const sessionRawMessages = asLiveMessages(
 			buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages,
-		);
+		).filter((message) => message.role !== "system");
 		const sessionProjection = state.enabled ? applyProjection(sessionRawMessages, state.checkpoint) : undefined;
 		const visibleRaw = selectContextVisibleMessages(sessionRawMessages);
 		const effective = selectContextVisibleMessages(
@@ -1193,7 +1198,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				return;
 			}
 		}
-		const [actionWord = "status", ...rest] = words.map((word) => word.toLowerCase());
+		const [actionWord = "status"] = words.map((word) => word.toLowerCase());
 		const action = actionWord;
 		switch (action) {
 			case "status": {
@@ -1258,9 +1263,19 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	pi.on("before_agent_start", async (event) => {
 		if (!state.enabled || !store) return;
-		const sections = [event.systemPrompt, systemGuidance(store.filePath, editingMode)];
+		const sections = [systemGuidance(store.filePath, editingMode)];
 		if (steering) sections.push(steeringPromptSection(steering));
-		return { systemPrompt: sections.join("\n\n") };
+		const guidance = sections.join("\n\n");
+		const options = event.systemPromptOptions as typeof event.systemPromptOptions & {
+			sections?: Record<string, string>;
+		};
+		// A whole-prompt return freezes a forced snapshot on newer Pi, hiding later additions.
+		if (options?.sections) {
+			options.sections.live_context_management = guidance;
+			return;
+		}
+		// Older Pi exposes read-only options and composes string returns instead.
+		return { systemPrompt: [event.systemPrompt, guidance].join("\n\n") };
 	});
 
 	pi.on("context", async (event, ctx) => {

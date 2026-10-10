@@ -14,11 +14,12 @@
     "extensions": ["./index.ts"],
     "image": "https://raw.githubusercontent.com/lolipopshock/pi-clm/main/.github/images/overview.png"
   },
-  "files": ["index.ts", "src/**", "!src/__tests__/**", "steering/**", "docs/*.md", "LICENSE", "README.md"],
+  "files": ["index.ts", "src/**", "!src/__tests__/**", "steering/**", "docs/*.md", "scripts/check-extension-context.py", "LICENSE", "README.md"],
   "scripts": {
     "test": "tsx --test src/__tests__/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "tsc --noEmit && tsx --test src/__tests__/*.test.ts"
+    "check": "tsc --noEmit && tsx --test src/__tests__/*.test.ts",
+    "check:compatibility": "python3 scripts/check-extension-context.py"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

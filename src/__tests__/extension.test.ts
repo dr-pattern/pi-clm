@@ -1602,3 +1602,78 @@ describe("pi-clm entry point", () => {
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 });
+
+describe("native prompt sections", () => {
+	for (const editingMode of ["clm", "conservative"] as const) {
+		test(`${editingMode}: contributes its section without forcing a prompt snapshot`, async () => {
+			const harness = createHarness();
+			liveContextExtension(harness.pi, { editingMode });
+			await emit(harness, "session_start", { reason: "startup" });
+			try {
+				const sections: Record<string, string> = { third_party: "Keep sibling guidance" };
+				const event = { systemPrompt: "base prompt", systemPromptOptions: { sections } };
+				const result = await emit(harness, "before_agent_start", event);
+				assert.equal(result[0], undefined);
+				assert.equal(event.systemPrompt, "base prompt");
+				assert.equal(sections.third_party, "Keep sibling guidance");
+				assert.match(sections.live_context_management, /mirrored at `[^`]+`/);
+				assert.doesNotMatch(sections.live_context_management, /base prompt/);
+				sections.later_extension = "Later contributions must remain composable";
+				assert.equal(event.systemPromptOptions.sections.later_extension, "Later contributions must remain composable");
+			} finally { await emit(harness, "session_shutdown", {}); }
+		});
+	}
+
+	test("does not clear another extension's intentional forced prompt", async () => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "startup" });
+		try {
+			const sections: Record<string, string> = {};
+			const options = { sections, forceSystemPrompt: "INTENTIONAL_OVERRIDE", selectedTools: ["read"] };
+			const result = await emit(harness, "before_agent_start", {
+				systemPrompt: "INTENTIONAL_OVERRIDE", systemPromptOptions: options,
+			});
+			assert.equal(result[0], undefined);
+			assert.equal(options.forceSystemPrompt, "INTENTIONAL_OVERRIDE");
+			assert.deepEqual(options.selectedTools, ["read"]);
+			assert.match(sections.live_context_management, /Editable context/);
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+});
+
+describe("restored native snapshots", () => {
+	test("ignores Pi-owned system messages when validating a resumed conversation checkpoint", async () => {
+		const raw = rawConversation();
+		const projected: LiveContextMessage[] = [
+			raw[0],
+			{ role: "custom", customType: "live-context-projection", content: "PROJECTED_NOTES_MARKER",
+				display: false, timestamp: 3 },
+		];
+		const checkpoint = createProjectionCheckpoint({
+			revision: 1, sourceMessages: raw, projectedMessages: projected,
+			beforeEstimate: 1200, afterEstimate: 30, estimateUnit: "tokens",
+		});
+		const harness = createHarness([
+			{ type: "message", id: "system-1", parentId: null,
+				message: { role: "system", content: "Native prompt and tool state", timestamp: 0 } },
+			{ type: "message", id: "m1", parentId: "system-1", message: raw[0] },
+			{ type: "message", id: "m2", parentId: "m1", message: raw[1] },
+			{ type: "custom", id: "saved", parentId: "m2", customType: LIVE_CONTEXT_STATE,
+				data: { version: 1, enabled: true, revision: 1, checkpoint } },
+		]);
+		harness.ctx.sessionManager.getLeafId = () => harness.branch.at(-1)?.id ?? null;
+		harness.ctx.mode = "rpc";
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "resume" });
+		try {
+			await harness.commands.get("clm").handler("input", harness.ctx);
+			const input = harness.notifications.at(-1)!;
+			assert.match(input, /current input \(2 messages\)/);
+			assert.match(input, /PROJECTED_NOTES_MARKER/);
+			assert.doesNotMatch(input, /Old investigation/);
+			assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length, 1,
+				"viewing a restored snapshot must not reset or rewrite the saved checkpoint");
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+});
